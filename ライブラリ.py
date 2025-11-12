@@ -204,8 +204,8 @@ class Ifs_base():
 #        df=pd.read_csv(file_path,header=colunms_pos,encoding="Shift-Jis")
         
         df=df[[item for item in item_list]]#item_listに記載されている項目だけのファイルを作成する。
-        df.to_excel(file_path[:-5]+'原本.xlsx')
-        with StyleFrame.ExcelWriter(file_path[:-5]+'一覧.xlsx') as writer:
+        df.to_excel(file_path[:-5]+'.xlsx')
+        with StyleFrame.ExcelWriter(file_path[:-4]+'.xlsx') as writer:
             sf=StyleFrame(df)
 #            for item in item_list:
             for (item,iten_width) in zip(item_list,item_width):
@@ -231,32 +231,9 @@ class Ifs_base():
 #            for item in item_list:
             for (item,iten_width) in zip(item_list,item_width):
                 sf.set_column_width(columns=[item], width=iten_width)
-
+#            sf.set_row_height(rows=list(range(2, len(df_jira_list)+2)), height=40)
             sf.to_excel(writer, index=False)
         return file_path
- 
-##################################################
-#    
-# 入力：df          書込みたいデータフレーム
-#       file_path　　ファイルパス
-# 　　　colunms_pos　コラムの行
-# 　　　item_list　　抽出したい項目リスト
-# 　　　item_width)　抽出したい項目リストの幅
-# 出力：エクセルファイル
-    def write_df_excel(self,df,file_path,item_list,item_width):
-#        df=pd.read_excel(file_path,header=colunms_pos,sheet_name=sheet_name)
-        df=df[[item for item in item_list]]#item_listに記載されている項目だけのファイルを作成する。
-#        with StyleFrame.ExcelWriter(file_path[:-5]+'xxx.xlsx') as writer:
-        with StyleFrame.ExcelWriter(file_path) as writer:
-            sf=StyleFrame(df)
-#            for item in item_list:
-            for (item,iten_width) in zip(item_list,item_width):
-                sf.set_column_width(columns=[item], width=iten_width)
-
-            sf.to_excel(writer, index=False)
-        return file_path 
- 
- 
             
 ###############################################
 #
