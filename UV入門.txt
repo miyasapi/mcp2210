@@ -1,0 +1,32 @@
+1. uvのインストール
+irm https://astral.sh/uv/install.ps1 | iex
+
+バージョン確認
+　uv --version
+
+2. プロジェクトのホルダーの作成
+
+# プロジェクト用のフォルダを作成
+mkdir my-python-project
+
+# 作成したフォルダに移動
+cd my-python-project
+
+3. 仮想環境の作成と有効化（アクティベート）
+　Python開発では、プロジェクトごとにパッケージを隔離する「仮想環境」を作成する
+
+　仮想環境の作成
+　uv venv
+　仮想環境の有効化（アクティベート）
+　.venv\Scripts\Activate.ps1
+
+　->　　　(supu-profect) PS C:\Users\satom\OneDrive\ドキュメント\10-技術\00-UV仮想環境\supu-profect> 
+
+4. パッケージのインストール (`uv pip`)
+　例）HTTPリクエストを簡単に行える `requests` ライブラリ
+　　uv pip install requests
+5. Pythonプログラムの実行
+　python main.py
+
+
+
