@@ -1,0 +1,89 @@
+(defun c:EXPORTCSV ( / p1 p2 ss lst sorted rowlist rows cols fp )
+
+  ;;---------------------------
+  ;; ① 矩形ウィンドウを選択
+  ;;---------------------------
+  (prompt "\n矩形の1点目を指示してください：")
+  (setq p1 (getpoint))
+  (prompt "\n矩形の対角点を指示してください：")
+  (setq p2 (getpoint))
+
+  (setq ss (ssget "W" p1 p2 '((0 . "TEXT,MTEXT"))))
+  (if (not ss)
+    (progn
+      (alert "指定範囲にTEXT/MTEXTがありません。")
+      (exit)
+    )
+  )
+
+  ;;---------------------------
+  ;; ② 文字情報をリスト化
+  ;;    (文字列, X座標, Y座標)
+  ;;---------------------------
+  (setq lst '())
+  (repeat (sslength ss)
+    (setq ent (ssname ss (setq idx (1- (sslength ss)))))
+    (setq ed (entget ent))
+    (setq pt (cdr (assoc 10 ed)))
+    (setq txt (cdr (assoc 1 ed)))
+    (setq lst (cons (list txt (car pt) (cadr pt)) lst))
+  )
+
+  ;;---------------------------
+  ;; ③ Y座標で行を並べ替え
+  ;;---------------------------
+  (setq sorted
+    (vl-sort lst
+      (function (lambda (a b) (> (caddr a) (caddr b))))
+    )
+  )
+
+  ;;---------------------------
+  ;; ④ 行ごとにグループ化（Y座標）
+  ;;    1mm以内を同じ行とみなす
+  ;;---------------------------
+  (setq rowlist '())
+  (foreach item sorted
+    (setq added nil)
+    (foreach r rowlist
+      (if (< (abs (- (caddr (car r)) (caddr item))) 1.0)
+        (progn
+          (setq r (append r (list item)))
+          (setq added T)
+        )
+      )
+    )
+    (if (not added)
+      (setq rowlist (append rowlist (list (list item))))
+    )
+  )
+
+  ;;---------------------------
+  ;; ⑤ 行内を X 座標で並べ替え
+  ;;---------------------------
+  (setq rows '())
+  (foreach r rowlist
+    (setq cols (vl-sort r
+                 (function (lambda(a b)(< (cadr a)(cadr b))))
+               )
+    )
+    (setq rows (append rows (list cols)))
+  )
+
+  ;;---------------------------
+  ;; ⑥ CSV出力
+  ;;---------------------------
+  (setq fp (open "table_export.csv" "w"))
+  (foreach r rows
+    (write-line
+      (apply 'strcat
+             (mapcar '(lambda(x)(strcat (car x) ",")) r)
+      )
+      fp
+    )
+  )
+  (close fp)
+
+  (princ "\nCSVを書き出しました → table_export.csv")
+  (princ)
+)
