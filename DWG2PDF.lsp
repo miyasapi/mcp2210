@@ -1,16 +1,22 @@
 (defun c:DWG2PDF (/ dwglist dwg pdf full)
-  ;; 変換対象DWG一覧取得
-  (setq dwglist (vl-directory-files "C:/dwg" "*.dwg" 1))
+  ;; C:\draw のDWG一覧取得
+  (setq dwglist (vl-directory-files "C:/draw" "*.dwg" 1))
 
-  ;; 1件ずつ処理
+  ;; ダイアログ無効（完全自動処理のため）
+  (setvar "FILEDIA" 0)
+
+  ;; 1つずつ処理
   (foreach dwg dwglist
-    (setq full (strcat "C:/dwg/" dwg))
+    ;; DWGのフルパス
+    (setq full (strcat "C:/draw/" dwg))
+
+    ;; 図面を開く（_.OPENは2023でも安定）
     (command "_.OPEN" full)
 
-    ;; PDF保存名
-    (setq pdf (strcat "C:/dwg/" (vl-filename-base dwg) ".pdf"))
+    ;; PDFファイル名（DWGと同じ名前）
+    (setq pdf (strcat "C:/draw/" (vl-filename-base dwg) ".pdf"))
 
-    ;; プロット → PDF出力
+    ;; プロット→PDF出力
     (command "-PLOT"
              "Y"
              ""
@@ -25,13 +31,16 @@
              pdf
              "Y")
 
-    ;; ---- ★ 安定化のため待機 300ms（0.3秒） ----
+    ;; ---- ★ 安定化のための待機（0.3秒） ----
     (vl-cmdf "_.DELAY" 300)
 
-    ;; 図面を保存せずに閉じる
+    ;; 図面を保存せず閉じる
     (command "_.CLOSE" "_YES")
   )
 
-  (princ "\n★ PDF出力完了しました！（C:/dwg）")
+  ;; ダイアログを元に戻す
+  (setvar "FILEDIA" 1)
+
+  (princ "\n★ PDF出力完了しました！（C:/draw）")
   (princ)
 )
