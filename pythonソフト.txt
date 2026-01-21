@@ -1,0 +1,167 @@
+1.ラズパイの設定ツールを起動
+　sudo raspi-config
+２．Interface Options → I2C → Enable
+３．再起動
+　sudo reboot
+
+1) 配線（BME280 → ラズパイ・I2C）
+　　I2Cデバイスを確認
+
+    sudo apt update
+    sudo apt install -y i2c-tools
+    i2cdetect -y 1
+  ◎　x76 または 0x77 が表示されればOK
+2) 必要パッケージのインストール（Python）
+　標準パッケージ＋軽量ドライバ（推奨）
+　　
+    sudo apt install -y python3-pip
+    pip3 install smbus2 RPi.bme280
+3) 最小サンプル（TCPサーバ＋BME280読み取り）
+    ファイル名例：bme280_tcp_server.py
+
+#!/usr/bin/env python3
+************************************************************************************************
+import socket
+import time
+import sys
+import os
+
+import smbus2
+import bme280  # パッケージ名は RPi.bme280
+
+# ====== 設定（必要に応じて変更） ======
+I2C_BUS       = 1
+BME280_ADDR   = 0x76   # ボードにより 0x77 の場合あり
+TCP_HOST      = "0.0.0.0"  # すべてのNICで待受
+TCP_PORT      = 50000      # PLC側のTCPクライアントが接続してくるポート
+SEND_INTERVAL = 1.0        # 送信間隔（秒）
+# ====================================
+
+def init_bme280(address=BME280_ADDR, bus=I2C_BUS):
+    bus_obj = smbus2.SMBus(bus)
+    # 補正値の読み込み（calibration_params は取得に少し時間がかかる）
+    calibration_params = bme280.load_calibration_params(bus_obj, address)
+    return bus_obj, calibration_params
+
+def read_bme280(bus_obj, calibration_params, address=BME280_ADDR):
+    # データ取得（dictで返る）
+    data = bme280.sample(bus_obj, address, calibration_params)
+    # 温度(°C), 圧力(hPa), 湿度(%)
+    temp_c = float(data.temperature)
+    press_hpa = float(data.pressure)
+    hum_pct = float(data.humidity)
+    return temp_c, press_hpa, hum_pct
+
+def format_csv_line(temp_c, press_hpa, hum_pct):
+    # 小数1?2桁程度に丸め（PLC側で扱いやすく）
+    return f"{temp_c:.1f},{press_hpa:.1f},{hum_pct:.1f}\n"
+
+def start_tcp_server():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # すぐ再起動できるように
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((TCP_HOST, TCP_PORT))
+    server.listen(1)
+    print(f"[INFO] TCP server listening on {TCP_HOST}:{TCP_PORT}")
+    return server
+
+def serve_once(server, bus_obj, calibration_params):
+    # 1クライアント（= PLC）とセッションを張って送信し続ける
+    conn, addr = server.accept()
+    print(f"[INFO] PLC connected from {addr}")
+    with conn:
+        conn.settimeout(5.0)  # 切断検知用
+        while True:
+            try:
+                # 測定
+                t, p, h = read_bme280(bus_obj, calibration_params)
+                line = format_csv_line(t, p, h)
+                # 送信（UTF-8 ASCII互換。PLC側はASCII受信でOK）
+                conn.sendall(line.encode("utf-8"))
+                # デバッグ出力
+                print(f"[SEND] {line.strip()}")
+                time.sleep(SEND_INTERVAL)
+            except (socket.timeout, BrokenPipeError, ConnectionResetError) as e:
+                print(f"[WARN] Connection lost: {e}")
+                break
+            except Exception as e:
+                # センサ読み取り失敗など
+                print(f"[ERROR] {e}")
+                time.sleep(1.0)
+
+def main():
+    try:
+        bus_obj, calib = init_bme280()
+    except Exception as e:
+        print(f"[FATAL] BME280 init failed: {e}")
+        sys.exit(1)
+
+    server = start_tcp_server()
+
+    try:
+        while True:
+            try:
+                serve_once(server, bus_obj, calib)
+                print("[INFO] Waiting next PLC connection...")
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                print(f"[ERROR] {e}")
+                time.sleep(1.0)
+    except KeyboardInterrupt:
+        print("\n[INFO] Stopped by user")
+    finally:
+        try:
+            server.close()
+        except:
+            pass
+
+if __name__ == "__main__":
+    main()
+``
+*************************************************************************
+実行
+　python3 bme280_tcp_server.py
+
+listening on 0.0.0.0:50000 が出たら待受状態
+KV?500（TCPクライアント）が繋がると、1秒ごとに
+25.3,1021.8,45.6 のように送信します
+
+4) まずはPCから疎通テスト（PLC前の動作確認）
+   同一LAN上の別PCから（WindowsでもLinuxでもOK）：
+
+
+# PiのIPアドレスが 192.168.0.50 の例
+nc 192.168.0.50 50000
+# または
+telnet 192.168.0.50 50000
+``
+接続できれば、1秒ごとにCSV行が流れてくるはずです。
+（表示例：24.9,1018.5,41.2）
+
+5) よくあるつまずき（対策）
+
+何も表示されない
+→ i2cdetect -y 1 で 0x76/0x77 が見えるか確認
+→ BME280のVccが3.3Vになっているか確認（5Vは不可）
+接続できない（タイムアウト）
+→ PiのIP/ポート（50000）が正しいか
+→ Pi側のファイアウォール（通常は無効）
+値が NaN / 0 になる
+→ 配線のSDA/SCL逆、アドレス違い（BME280_ADDR を 0x77 に変更）
+複数PLCから同時接続したい
+→ 今回の最小コードは1接続前提。複数接続はスレッド/非同期で拡張可能
+
+6) KV?500側で設定すべきポイント（要約）
+
+TCPクライアント命令で
+
+接続先IP：ラズパイのIP
+ポート：50000（上のコードと一致させる）
+
+
+受信：改行（LF, 0x0A）までを1レコードとしてバッファに取り込み
+文字列分割："," で分解 → ASCII→数値変換（REAL/DINT）
+タイムアウト：切断時に再接続リトライ
+
+
