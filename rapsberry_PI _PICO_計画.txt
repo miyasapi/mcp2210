@@ -1,0 +1,243 @@
+いいですね、要件がはっきりしました。
+温度・湿度・気圧を 5 分おきに送信／2 台程度／TLS 要件なし／後でグラフ化したい??であれば、まずは ThingSpeak（無料 IoT クラウド） が最短・最小コストです。
+ThingSpeak は 非商用の小規模用途なら無料で使え、可視化（グラフやゲージ）まで内蔵。REST（HTTP）で気軽に送れて、Pico W の MicroPython からの実装例も多く、無料枠の範囲（年間 300 万メッセージ、チャンネル 4 個まで、更新間隔 15 秒以上） なら費用ゼロで運用できます。5 分間隔・2 台なら十分余裕があります。 [thingspeak...hworks.com], [thingspeak...hworks.com], [thingspeak...hworks.com], [thingspeak...hworks.com]
+
+参考（Pico W + ThingSpeak の作例・手順）：BME280 を使って温度/湿度/気圧を ThingSpeak に送るチュートリアルや配線も公開されています。 [microcontr...erslab.com], [instructables.com], [forums.ras...errypi.com]
+
+
+推奨構成（無料で完結）
+
+クラウド：ThingSpeak（非商用・無料枠）
+
+1 台 = 1 チャンネル（最大 4 チャンネルまで無料）
+メッセージ上限：年 300 万（≒ 8,200/日）。5 分ごと × 3 フィールドでも余裕。
+最小送信間隔：15 秒（5 分なのでクリア） [thingspeak...hworks.com], [thingspeak...hworks.com]
+
+
+デバイス：Raspberry Pi Pico W × 2
+センサー：BME280（I2C、3.3V）?温度/湿度/気圧を 1 回で取得
+プロトコル：HTTP（非 TLS／要件なしのためシンプル）
+可視化：ThingSpeak の標準ウィジェット（折れ線、ゲージ、集計） [instructables.com]
+
+
+手順（5 分で形にする）
+1) ThingSpeak 側の準備
+
+ThingSpeak にサインアップ → New Channel を作成
+
+Field1: Temperature（℃）
+Field2: Humidity（%RH）
+Field3: Pressure（hPa）
+
+
+Write API Key を控える（API Keys タブ）
+チャートは Add Visualization で各フィールドを選ぶだけ（グラフ／数値表示等） [instructables.com]
+
+
+無料枠の制限（チャンネル上限、年 300 万メッセージ、15 秒以上）はライセンス FAQ に明記。 [thingspeak...hworks.com]
+
+2) 配線（Pico W ? BME280）
+
+BME280（I2C）
+
+VCC → 3V3
+GND → GND
+SCL → GP5（I2C0 SCL／※基板の配線に合わせて変更可）
+SDA → GP4（I2C0 SDA）
+
+
+I2C ピンは変更可です（コード側で指定）。BME280 の I2C アドレスは一般に 0x76 または 0x77。
+BME280 の配線・使い方チュートリアル参照 [microcontr...erslab.com]
+
+3) Pico W（MicroPython）コード
+
+5 分ごとに温度・湿度・気圧を ThingSpeak に HTTP POST。Wi?Fi の自動再接続と簡易リトライを実装。
+
+
+
+# main.py (MicroPython for Raspberry Pi Pico W)
+import network, time, urequests as requests
+from machine import I2C, Pin
+import struct
+
+# ===== ユーザー設定 =====
+WIFI_SSID = "YOUR_SSID"
+WIFI_PASS = "YOUR_PASS"
+THINGSPEAK_WRITE_API_KEY = "YOUR_API_KEY"  # Channel の Write API Key
+POST_URL = "http://api.thingspeak.com/update"  # 非TLS（要件なしのためシンプル） 
+POST_INTERVAL_SEC = 300  # 5分
+I2C_SCL = 5  # GP5
+I2C_SDA = 4  # GP4
+BME280_ADDR = 0x76  # 0x77 の個体もあり
+
+# ===== Wi-Fi 接続 =====
+def ensure_wifi(timeout_s=15):
+    wlan = network.WLAN(network.STA_IF)
+    if not wlan.active():
+        wlan.active(True)
+    if not wlan.isconnected():
+        wlan.connect(WIFI_SSID, WIFI_PASS)
+        t0 = time.ticks_ms()
+        while not wlan.isconnected():
+            if time.ticks_diff(time.ticks_ms(), t0) > timeout_s * 1000:
+                raise RuntimeError("WiFi connect timeout")
+            time.sleep_ms(200)
+    return wlan
+
+# ===== BME280（超軽量ドライバ相当）=====
+class BME280:
+    def __init__(self, i2c, addr=BME280_ADDR):
+        self.i2c, self.addr = i2c, addr
+        # チップID確認 (0xD0 should be 0x60)
+        if self.i2c.readfrom_mem(self.addr, 0xD0, 1)[0] != 0x60:
+            raise RuntimeError("BME280 not found")
+        # リセット
+        self.i2c.writeto_mem(self.addr, 0xE0, b'\xB6')
+        time.sleep_ms(300)
+        # 補正係数読み取り
+        self._read_calib()
+        # センサ設定（温度/湿度/圧力 oversampling=1, 通常モード）
+        self.i2c.writeto_mem(self.addr, 0xF2, b'\x01')  # ctrl_hum
+        self.i2c.writeto_mem(self.addr, 0xF4, b'\x27')  # ctrl_meas
+        self.i2c.writeto_mem(self.addr, 0xF5, b'\xA0')  # config (standby 1000ms)
+
+    def _read_calib(self):
+        # 温度・圧力補正係数
+        calib = self.i2c.readfrom_mem(self.addr, 0x88, 24)
+        dig_T1, dig_T2, dig_T3, \
+        dig_P1, dig_P2, dig_P3, dig_P4, dig_P5, dig_P6, dig_P7, dig_P8, dig_P9 = struct.unpack("<HhhHhhhhhhhh", calib)
+        # 湿度補正係数
+        dig_H1 = self.i2c.readfrom_mem(self.addr, 0xA1, 1)[0]
+        calibH = self.i2c.readfrom_mem(self.addr, 0xE1, 7)
+        dig_H2, dig_H3 = struct.unpack("<hB", calibH[:3])
+        e4, e5, e6, h7 = calibH[3], calibH[4], calibH[5], calibH[6]
+        dig_H4 = (e4 << 4) | (e5 & 0x0F)
+        dig_H5 = (e6 << 4) | (e5 >> 4)
+        dig_H6 = (h7 if h7 < 128 else h7 - 256)
+
+        self.cT = (dig_T1, dig_T2, dig_T3)
+        self.cP = (dig_P1, dig_P2, dig_P3, dig_P4, dig_P5, dig_P6, dig_P7, dig_P8, dig_P9)
+        self.cH = (dig_H1, dig_H2, dig_H3, dig_H4, dig_H5, dig_H6)
+        self.t_fine = 0
+
+    def read(self):
+        # 生データ 8バイト: p[20:38], t[20:36], h[20:28]
+        data = self.i2c.readfrom_mem(self.addr, 0xF7, 8)
+        adc_p = ((data[0] << 12) | (data[1] << 4) | (data[2] >> 4))
+        adc_t = ((data[3] << 12) | (data[4] << 4) | (data[5] >> 4))
+        adc_h = (data[6] << 8) | data[7]
+
+        # 温度補正
+        dig_T1, dig_T2, dig_T3 = self.cT
+        var1 = (((adc_t >> 3) - (dig_T1 << 1)) * dig_T2) >> 11
+        var2 = (((((adc_t >> 4) - dig_T1) * ((adc_t >> 4) - dig_T1)) >> 12) * dig_T3) >> 14
+        self.t_fine = var1 + var2
+        T = (self.t_fine * 5 + 128) >> 8  # 0.01 degC
+        temp_c = T / 100.0
+
+        # 圧力補正
+        dig_P1, dig_P2, dig_P3, dig_P4, dig_P5, dig_P6, dig_P7, dig_P8, dig_P9 = self.cP
+        var1 = self.t_fine - 128000
+        var2 = var1 * var1 * dig_P6
+        var2 = var2 + ((var1 * dig_P5) << 17)
+        var2 = var2 + (dig_P4 << 35)
+        var1 = ((var1 * var1 * dig_P3) >> 8) + ((var1 * dig_P2) << 12)
+        var1 = (((1 << 47) + var1) * dig_P1) >> 33
+        p = 1048576 - adc_p
+        p = (((p << 31) - var2) * 3125) // var1
+        var1 = (dig_P9 * (p >> 13) * (p >> 13)) >> 25
+        var2 = (dig_P8 * p) >> 19
+        pressure_pa = ((p + var1 + var2) >> 8) + (dig_P7 << 4)
+        pressure_hpa = pressure_pa / 100.0
+
+        # 湿度補正
+        dig_H1, dig_H2, dig_H3, dig_H4, dig_H5, dig_H6 = self.cH
+        v_x1_u32r = self.t_fine - 76800
+        v_x1_u32r = (((((adc_h << 14) - (dig_H4 << 20) - (dig_H5 * v_x1_u32r)) + 16384) >> 15) *
+                     (((((((v_x1_u32r * dig_H6) >> 10) * (((v_x1_u32r * dig_H3) >> 11) + 32768)) >> 10) + 2097152) *
+                        dig_H2 + 8192) >> 14))
+        v_x1_u32r = v_x1_u32r - (((((v_x1_u32r >> 15) * (v_x1_u32r >> 15)) >> 7) * dig_H1) >> 4)
+        v_x1_u32r = 0 if v_x1_u32r < 0 else v_x1_u32r
+        v_x1_u32r = (419430400 if v_x1_u32r > 419430400 else v_x1_u32r)
+        hum = (v_x1_u32r >> 12) / 1024.0
+
+        return round(temp_c, 2), round(hum, 2), round(pressure_hpa, 2)
+
+# ===== HTTP 送信 =====
+def post_to_thingspeak(temp, hum, press):
+    payload = {
+        "api_key": THINGSPEAK_WRITE_API_KEY,
+        "field1": temp,
+        "field2": hum,
+        "field3": press
+    }
+    r = requests.post(POST_URL, json=payload, headers={"Content-Type": "application/json"}, timeout=8)
+    try:
+        # 200 以外でも ThingSpeak は更新ID を返すことあり。レスポンステキスト確認用。
+        print("ThingSpeak response:", r.status_code, r.text)
+    finally:
+        r.close()
+
+def main():
+    i2c = I2C(0, scl=Pin(I2C_SCL), sda=Pin(I2C_SDA), freq=100000)
+    sensor = BME280(i2c)
+
+    while True:
+        try:
+            ensure_wifi()
+            t, h, p = sensor.read()
+            print("T={:.2f}C H={:.2f}% P={:.2f}hPa".format(t, h, p))
+            # 送信（簡易リトライ）
+            for attempt in range(3):
+                try:
+                    post_to_thingspeak(t, h, p)
+                    break
+                except Exception as e:
+                    print("post err:", e)
+                    time.sleep(2)
+        except Exception as e:
+            print("loop err:", e)
+        # 5 分待ち
+        time.sleep(POST_INTERVAL_SEC)
+
+main()
+
+
+注：ThingSpeak は REST API http://api.thingspeak.com/update への書き込みで動作します（HTTPS も可）。1 チャンネルあたり最大 8 フィールドあるので、温度/湿度/気圧の 3 フィールドをまとめて送れます。 [halvorsen.blog]
+
+
+ダッシュボード（可視化）
+
+各フィールドに Line Chart（過去 24h/7d など）
+Numeric Display や ゲージで現在値を表示
+ダッシュボードはチャネル画面から Add Widget / Add Visualization で追加するだけです。 [instructables.com]
+
+
+2 台運用のポイント
+
+各デバイスに 1 チャンネル（2 台 → 2 チャンネル）。無料枠（4 チャンネル）内に収まります。 [thingspeak...hworks.com]
+各チャンネルで同じフィールド構成（Temp/Hum/Press）にしておくと、後で比較が楽。
+
+
+消費電力・安定運用 Tips（宮本さん向け）
+
+送信ピーク電流：Wi?Fi 送信で突入あり。3.3V 系のバルク（?470μF 低ESR）を近傍に。
+再接続：上のコードは ensure_wifi() と簡易リトライあり。長期運用なら WDT 追加も有効。
+時刻同期は必須ではない（TLS 不要の要件）が、ログの整合のため NTP で合わせておくと便利。
+アンテナ前方の金属遮蔽に注意（Pico W のアンテナ窓は樹脂推奨）。
+
+
+もし将来「本格管理」や「他クラウド連携」が必要になったら
+
+AWS IoT Core（無料枠）：月 25 万メッセージ × 12 か月。DynamoDB/S3/CloudWatch へルーティングして可視化も可能（TLS 必須・証明書セットアップあり）。 [aws.amazon.com], [fourier.jp], [qiita.com], [bloomblock.net]
+
+
+次のステップ
+
+ThingSpeak で チャンネルを 2 つ作成（3 フィールド）し、各 Write API Key を控える
+上の YOUR_API_KEY を書き換え、1 台ずつ動作確認
+ダッシュボードにグラフ/ゲージを追加して完了
+
+必要なら、チャンネル作成～ダッシュボード設定のスクリーンショット付き手順や、時系列のダウンロード（CSV）/外部連携も手順化します。
+宮本さん、まずは チャンネル名（例：picow-01 / picow-02） を決めて進めましょう。作成済みなら Write API Key を教えていただければ、そのキーに合わせた main.py を 2 台分お渡しします。
+ソースBizChat ついてフィードバックするThingSpeakの登録方法は？グラフ表示の設定方法は？AWS IoT Coreの設定方法は？ファイルをここにドロップ
